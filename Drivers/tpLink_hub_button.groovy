@@ -9,7 +9,7 @@ metadata {
 	{
 		attribute "lowBattery", "string"
 		capability "Sensor"
-		attribute "lastTriggerNo", "NUMBER"
+//		attribute "lastTriggerNo", "NUMBER"
 		attribute "button", "STRING"
 	}
 	preferences {
@@ -17,9 +17,13 @@ metadata {
 	}
 }
 
-def installed() { runIn(1, updated) }
+def installed() { 
+	runIn(1, updated)
+	state.logId = 0
+}
 
 def updated() {
+	state.logId = 0
 	Map logData = [method: "updated", commonUpdated: commonUpdated()]
 	logInfo(logData)
 }
@@ -38,11 +42,12 @@ def getTriggerLog(count) {
 	sendDevCmd(requests, device.getDeviceNetworkId(), "parseUpdates")
 }
 
+///////////////////////////////////////
 def parse_get_trigger_log(result, data = null) {
 	Map logData = [method: "parse_get_trigger_log", data: data, result: result]
-	triggerLog = result.logs[0]
-	if (device.currentValue("lastTriggerNo") != triggerLog.id) {
-		sendEvent(name: "lastTriggerNo", value: triggerLog.id)
+	Map triggerLog = result.logs[0]
+	if (state.logId != triggerLog.id) {
+		state.logId = triggerLog.id
 		String trigger = triggerLog.event
 		if (trigger == "rotation") {
 			trigger = "rotateCW"
@@ -50,13 +55,10 @@ def parse_get_trigger_log(result, data = null) {
 				trigger = "rotateCCW"
 			}
 		}
-		sendEvent(name: "button", value: trigger)
-		logData << [ lastTriggerNo: triggerLog.start_id, button: trigger]
+		sendEvent(name: "button", value: trigger, isStateChange: true)
 	}
 	logDebug(logData)
 }
-
-
 
 
 // ~~~~~ start include (383) davegut.tpLinkChildCommon ~~~~~
