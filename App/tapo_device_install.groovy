@@ -35,6 +35,7 @@ preferences {
 	page(name: "startPage")
 	page(name: "enterCredentialsPage")
 	page(name: "addDevicesPage")
+	page(name: "manualCameraPage")
 	page(name: "removeDevicesPage")
 }
 
@@ -176,6 +177,10 @@ def startPage() {
 				href "addDevicesPage",
 					title: "<b>Scan for devices and add</b>",
 					description: "It will take 30+ seconds to find devices."
+
+				href "manualCameraPage",
+					title: "<b>Manually Add Camera by IP</b>",
+					description: "Use this when a Tapo camera does not appear during LAN discovery."
 			} else {
 				paragraph "<b>Credentials are required to scan for to find devices.</b>"
 			}
@@ -277,6 +282,149 @@ def addDevicesPage() {
 		}
 	}
 } 
+
+def manualCameraPage() {
+    logDebug([method: "manualCameraPage"])
+
+    if (manualCameraIp && manualCameraSubmit) {
+        manualCameraAdd(manualCameraIp)
+        app?.updateSetting("manualCameraSubmit", false)
+    }
+
+    return dynamicPage(
+        name: "manualCameraPage",
+        title: "Manually Add Tapo Camera",
+        nextPage: startPage,
+        install: false
+    ) {
+        section("Camera Address") {
+            paragraph """
+                Enter the IP address of a Tapo camera that was not found during normal discovery.
+
+                The integration will connect directly to the camera, authenticate using your
+                configured Tapo credentials, and query the camera for its model, MAC address,
+                alias, and supported components.
+            """
+
+            input "manualCameraIp",
+                "string",
+                title: "<b>Camera IP Address</b>",
+                description: "Example: 192.168.155.42",
+                required: false,
+                submitOnChange: false
+
+            input "manualCameraSubmit",
+                "bool",
+                title: "<b>Connect to this camera</b>",
+                description: "Enable this and select Next/Done to query the camera.",
+                required: false,
+                defaultValue: false,
+                submitOnChange: true
+        }
+
+        if (state.manualCameraStatus) {
+            section("Result") {
+                paragraph state.manualCameraStatus
+            }
+        }
+    }
+}
+
+def manualCameraAdd(ipAddress) {
+    Map logData = [method: "manualCameraAdd", ip: ipAddress]
+
+    String ip = ipAddress?.trim()
+
+    if (!validIpv4Address(ip)) {
+        state.manualCameraStatus =
+            "<b>Invalid IP address:</b> ${ipAddress ?: 'blank'}"
+        logWarn(logData + [status: "invalidIp"])
+        return
+    }
+
+    if (!userName || !userPassword) {
+        state.manualCameraStatus =
+            "<b>Tapo credentials have not been configured.</b>"
+        logWarn(logData + [status: "credentialsMissing"])
+        return
+    }
+
+    /*
+     * Build the same basic devData structure normally produced
+     * by UDP discovery.
+     *
+     * MAC, model, alias and exact device type will be populated
+     * after getDeviceInfo succeeds.
+     */
+    Map devData = [
+        ip      : ip,
+        port    : "443",
+        protocol: "camera",
+        baseUrl : "https://${ip}:443",
+        type    : "SMART.IPCAMERA",
+        model   : null,
+        dni     : null,
+        status  : "OK",
+        manual  : true
+    ]
+
+    Map hsInput = [
+        url : devData.baseUrl,
+        user: userName,
+        pwd : encPasswordCam
+    ]
+
+    /*
+     * Force the security capability check for this IP.
+     *
+     * state.isSecure is currently shared by the app rather than
+     * maintained per camera.
+     */
+    state.isSecure = false
+
+    state.manualCameraStatus =
+        "<b>Connecting to ${ip}...</b><br>" +
+        "If authentication succeeds, the camera will appear in the device list."
+
+    logInfo(logData + [status: "startingHandshake"])
+
+    try {
+        cameraHandshake(hsInput, devData)
+    } catch (err) {
+        state.manualCameraStatus =
+            "<b>Unable to connect to ${ip}.</b><br>${err}"
+
+        logWarn(logData + [
+            status: "handshakeException",
+            error: err
+        ])
+    }
+}
+
+Boolean validIpv4Address(String ip) {
+    if (!ip) {
+        return false
+    }
+
+    def parts = ip.tokenize(".")
+
+    if (parts.size() != 4) {
+        return false
+    }
+
+    try {
+        return parts.every { part ->
+            if (!(part ==~ /\d{1,3}/)) {
+                return false
+            }
+
+            Integer value = part.toInteger()
+            return value >= 0 && value <= 255
+        }
+    } catch (ignored) {
+        return false
+    }
+}
 
 def getInstalledDrivers() {
 	List installedDrivers = []
@@ -645,7 +793,6 @@ def addToDevices(devData, cmdData) { // library marker davegut.appTpLinkSmart, l
 	Map logData = [method: "addToDevices"] // library marker davegut.appTpLinkSmart, line 203
 	String dni = devData.dni // library marker davegut.appTpLinkSmart, line 204
 	def devicesData = atomicState.devices // library marker davegut.appTpLinkSmart, line 205
-	devicesData.remove(dni) // library marker davegut.appTpLinkSmart, line 206
 	def comps // library marker davegut.appTpLinkSmart, line 207
 	def cmdResp // library marker davegut.appTpLinkSmart, line 208
 	String alias // library marker davegut.appTpLinkSmart, line 209
@@ -659,14 +806,56 @@ def addToDevices(devData, cmdData) { // library marker davegut.appTpLinkSmart, l
 		byte[] plainBytes = cmdResp.nickname.decodeBase64() // library marker davegut.appTpLinkSmart, line 217
 		alias = new String(plainBytes) // library marker davegut.appTpLinkSmart, line 218
 		if (alias == "") { alias = model } // library marker davegut.appTpLinkSmart, line 219
-	} else { // library marker davegut.appTpLinkSmart, line 220
-		comps = cmdData.find { it.method == "getAppComponentList" } // library marker davegut.appTpLinkSmart, line 221
-		comps = comps.result.app_component.app_component_list // library marker davegut.appTpLinkSmart, line 222
-		cmdResp = cmdData.find { it.method == "getDeviceInfo" } // library marker davegut.appTpLinkSmart, line 223
-		cmdResp = cmdResp.result.device_info.basic_info // library marker davegut.appTpLinkSmart, line 224
-		alias = cmdResp.device_alias // library marker davegut.appTpLinkSmart, line 225
-		if (alias == "") { alias = model } // library marker davegut.appTpLinkSmart, line 226
-	} // library marker davegut.appTpLinkSmart, line 227
+		} else {
+		comps = cmdData.find { it.method == "getAppComponentList" }
+		comps = comps.result.app_component.app_component_list
+
+		cmdResp = cmdData.find { it.method == "getDeviceInfo" }
+		cmdResp = cmdResp.result.device_info.basic_info
+
+		/*
+		* Manual-IP discovery does not initially know the MAC,
+		* model, or exact device type.
+		*
+		* getDeviceInfo gives us those values.
+		*/
+		if (!model) {
+			model = cmdResp.device_model
+			devData.model = model
+		}
+
+		if (cmdResp.device_type) {
+			tpType = cmdResp.device_type
+			devData.type = tpType
+		}
+
+		if (!dni && cmdResp.mac) {
+			dni = cmdResp.mac.replaceAll(/[:-]/, "").toUpperCase()
+			devData.dni = dni
+		}
+
+		alias = cmdResp.device_alias
+
+		if (!alias) {
+			alias = model ?: "Tapo Camera"
+		}
+	}
+	if (!dni) {
+		logWarn([
+			method: "addToDevices",
+			status: "missingDni",
+			ip: devData.ip,
+			model: model
+		])
+
+		if (devData.manual) {
+			state.manualCameraStatus =
+				"<b>Connected to ${devData.ip}, but the camera did not return a MAC address.</b>"
+		}
+
+		return
+	} 
+	devicesData.remove(dni)
 	def type = "Unknown" // library marker davegut.appTpLinkSmart, line 228
 	def ctHigh // library marker davegut.appTpLinkSmart, line 229
 	def ctLow // library marker davegut.appTpLinkSmart, line 230
@@ -722,6 +911,16 @@ def addToDevices(devData, cmdData) { // library marker davegut.appTpLinkSmart, l
 	if (devData.power) { deviceData << [power: devData.power] } // library marker davegut.appTpLinkSmart, line 280
 	devicesData << ["${dni}": deviceData] // library marker davegut.appTpLinkSmart, line 281
 	atomicState.devices = devicesData // library marker davegut.appTpLinkSmart, line 282
+	if (devData.manual) {
+		state.manualCameraStatus =
+			"<b>Camera found!</b><br>" +
+			"Alias: ${alias}<br>" +
+			"Model: ${model}<br>" +
+			"IP: ${devData.ip}<br>" +
+			"MAC: ${cmdResp.mac ?: 'Unknown'}<br>" +
+			"Driver: TpLink ${type}<br><br>" +
+			"Return to <b>Scan for devices and add</b> to install it."
+	}
 	logData << ["${deviceData.alias}": deviceData, dni: dni] // library marker davegut.appTpLinkSmart, line 283
 	Map InfoData = ["${deviceData.alias}": "added to device data"] // library marker davegut.appTpLinkSmart, line 284
 	logInfo("${deviceData.alias}: added to device data") // library marker davegut.appTpLinkSmart, line 285
